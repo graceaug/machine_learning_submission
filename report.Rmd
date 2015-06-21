@@ -1,0 +1,183 @@
+---
+title: "Machine Learning Project Report - Human Activity Recognition"
+author: "Grace"
+---
+
+## Background  
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement -- a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it.  
+
+In this project, we will use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to predict how well they perform the exercise, in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+The Weight Lifting Exercise dataset is collected from this publication: Qualitative Activity Recognition of Weight Lifting Exercises. Read more: http://groupware.les.inf.puc-rio.br/har#ixzz3dHPxndLC
+
+### Download packages 
+```{r, cache = T}
+# install.packages("caret")
+# install.packages("rpart")
+# install.packages("rpart.plot")
+# install.packages("randomForest")
+# install.packages("corrplot")
+# install.packages("e1071")
+```
+### Download the training and testing datasets
+```{r, cache = T}
+trainUrl = "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testUrl = "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+trainFile = "./data/pml-training.csv"
+testFile  = "./data/pml-testing.csv"
+if (!file.exists("./data")) {
+  dir.create("./data")
+}
+if (!file.exists(trainFile)) {
+  download.file(trainUrl, destfile=trainFile)
+}
+if (!file.exists(testFile)) {
+  download.file(testUrl, destfile=testFile)
+}
+```  
+### Loading the dataset into data frames
+After downloading the data from the data source, we can read the two csv files into two data frames.  
+```{r, cache = T}
+trainRaw = read.csv("./data/pml-training.csv")
+testRaw = read.csv("./data/pml-testing.csv")
+dim(trainRaw)
+dim(testRaw)
+```
+The training dataset contains 19622 observations and 160 variables, while the testing dataset contains 20 observations and 160 variables. The "classe" variable in the training set is the outcome (manner in which the participants did the exercise) to predict. 
+
+### Data processing
+In this step, we will clean the data and remove observations with missing values as well as some meaningless variables.
+```{r, cache = T}
+sum(complete.cases(trainRaw))
+```
+There are only 406 records with no missing values out of 19622 records!
+
+First, we remove columns that contain NA missing values.
+```{r, cache = T}
+trainRaw = trainRaw[, colSums(is.na(trainRaw)) == 0] 
+dim(trainRaw)
+testRaw = testRaw[, colSums(is.na(testRaw)) == 0] 
+dim(testRaw)
+```  
+Next, we get rid of some columns that do not contribute much to the accelerometer measurements.
+```{r, cache = T}
+classe = trainRaw$classe # A, B, C, D, E, (extract out first as we do not want to convert this to numeric)
+head(trainRaw,1)
+#returns true/false for columns that contains these, these fields are numeric/integer as well 
+#which we do not need
+trainRemove = grepl("^X|timestamp|window", names(trainRaw)) 
+trainRaw = trainRaw[, !trainRemove] 
+#retain only those columns which does not match above words !FALSE = TRUE
+head(trainRaw, 1)
+dim(trainRaw)
+trainCleaned = trainRaw[, sapply(trainRaw, is.numeric)] #extract & retain only those cols that are numeric/integer
+dim(trainCleaned)
+trainCleaned$classe = classe #add back the original classe column
+dim(trainCleaned)
+
+#testRaw does not have classe variable, but has an additional problem_id variable from 1 to 20
+#returns true/false for columns that contains these, these fields are numeric/integer as well 
+#which we do not need
+head(testRaw,1)
+testRemove = grepl("^X|timestamp|window", names(testRaw)) 
+testRaw = testRaw[, !testRemove]  
+#retain only those columns which does not match above words !FALSE = TRUE
+head(testRaw,1)
+dim(testRaw)
+testCleaned = testRaw[, sapply(testRaw, is.numeric)] #extract & retain only those cols that are numeric/integer
+dim(testCleaned) #username removed
+```
+Now, the cleaned training dataset contains 19622 observations and 53 variables, while the cleaned testing dataset contains 20 observations and 53 variables. The "classe" variable is still in the cleaned training set.
+
+### Data Slicing
+We split the cleaned training set into a pure training dataset (70%) and a validation dataset (30%). 
+We will use the validation dataset to conduct cross validation in later part of the steps.  
+Refer to Appendix to see the Correlation of each variable with all other variables in the training dataset.
+```{r, cache = T}
+set.seed(123) # For reproducibility
+library(caret)
+inTrain = createDataPartition(trainCleaned$classe, p=0.70, list=F)
+trainData = trainCleaned[inTrain, ]
+testData = trainCleaned[-inTrain, ]
+```
+### Using Machine Learning Algo: Decision Tree for prediction
+We use the **Decision Tree** model to perform prediction.
+```{r, cache = T}
+library(rpart)
+treemodel = rpart(classe ~., data=trainData, method="class")
+```
+Then, we estimate the performance of the model on the validation dataset.  
+```{r, cache = T}
+predicttree = predict(treemodel, testData, type="class") #5885 results
+length(predicttree)
+head(predicttree,3)
+#plot the tree
+library(rpart.plot)
+rpart.plot(treemodel, main="Classification Tree", faclen=0)  # faclen=0 to print full factor names
+#alternative method to plot
+#prp(treemodel)
+confusionMatrix(testData$classe, predicttree)
+accuracy1 = postResample(predicttree, testData$classe)
+accuracy1
+oose1 = 1 - as.numeric(confusionMatrix(testData$classe, predicttree)$overall[1])
+oose1
+```
+From the confusion matrix, the estimated accuracy of the model is 72.4% and the estimated out-of-sample error is 0.28%.
+
+### Using Machine Learning Algo: Random Forest for prediction
+We fit a predictive model for activity recognition using **Random Forest** algorithm because it automatically selects important variables and is robust to correlated covariates & outliers in general. We will use **3-fold cross validation** when applying the algorithm.  
+```{r, cache = T}
+controlRf = trainControl(method="cv", 3)
+library(randomForest)
+#modelRf = train(classe ~ ., data=trainData, method="rf", trControl=controlRf, ntree=50)
+modelRf = randomForest(classe ~ ., data=trainData, ntree=250, trControl=controlRf)
+modelRf
+```
+Then, we estimate the performance of the model on the validation dataset.  
+```{r, cache = T}
+predictRf = predict(modelRf, testData)
+#predictRf
+confusionMatrix(testData$classe, predictRf)
+accuracy2 = postResample(predictRf, testData$classe)
+accuracy2
+oose2 = 1 - as.numeric(confusionMatrix(testData$classe, predictRf)$overall[1])
+oose2
+```
+From the confusion matrix, the estimated accuracy of the model is 99.4% and the estimated out-of-sample error is 0.56%.
+
+### Comparing Decision Tree Model and Random Forest Model
+We can tell from the confusion matrix results, the Random Forest Algorithm performed better than the Decision Tree Algorithm. The model accuracy for Random Forest was 99.4% (95% CI: 99.21%, 99.61%) compared to Decision Tree accuracy at 72.4% (95% CI 71.24%, 73.54%). Therefore, Random Forest is chosen. Our test dataset comprises 20 test case; with an accuracy rate of 99.4% on our cross-validation data, we can expect that very few or none of the test samples will be missclassified.
+
+### Predicting the Test Dataset
+Now, we apply the Random Forest model to the original test dataset downloaded from the data source. We remove the `problem_id` column which is the last column i.e. also = length of the dataframe, or ncol of dataframe.  
+
+```{r, cache = T}
+result = predict(modelRf, testCleaned[, -ncol(testCleaned)])
+result
+
+#write files for submission
+#create problem results folder
+if (!file.exists("./problem_results")) {
+  dir.create("./problem_results")
+}
+
+#store all problem id_1 to _20 txt files. and write the result to the content of the text file.
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_results/problem_id_",i,".txt")
+    write.table(x[i], file=filename, quote=FALSE,
+                row.names=FALSE, col.names=FALSE)
+  }
+}
+pml_write_files(result)
+```  
+
+### Appendix: Figure
+Correlation Matrix Visualization  
+```{r, cache = T}
+library(corrplot)
+#last col of trainData is classe, remove that
+corrPlot = cor(trainData[, -ncol(trainData)])
+corrplot(corrPlot, method="color")
+```
